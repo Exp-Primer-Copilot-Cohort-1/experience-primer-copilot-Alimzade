@@ -1,37 +1,71 @@
-// create web server
-var express = require("express");
-var app = express();
+// Create web server
+const express = require('express');
+const bodyParser = require('body-parser');
+const cors = require('cors');
+const axios = require('axios');
+const { randomBytes } = require('crypto');
 
-// use the express.static middleware to server static content
-app.use(express.static("public"));
+const app = express();
+app.use(bodyParser.json());
+app.use(cors());
 
-// use the body-parser middleware to parse the body of the request
-var bodyParser = require("body-parser");
-app.use(bodyParser.urlencoded({extended: true}));
+// Create comments array
+const commentsByPostId = {};
 
-// set the view engine to ejs
-app.set("view engine", "ejs");
-
-// create a comments array
-var comments = [];
-
-// home page route
-app.get("/", function(req, res) {
-    res.render("home", {comments: comments});
+// Get all comments for a post
+app.get('/posts/:id/comments', (req, res) => {
+  res.send(commentsByPostId[req.params.id] || []);
 });
 
-// create a new comment
-app.post("/comment", function(req, res) {
-    // get data from form and add to comments array
-    var author = req.body.author;
-    var comment = req.body.comment;
-    var newComment = {author: author, comment: comment};
-    comments.push(newComment);
-    // redirect back to the home page
-    res.redirect("/");
+// Create a comment for a post
+app.post('/posts/:id/comments', async (req, res) => {
+  const commentId = randomBytes(4).toString('hex');
+
+  // Get the content from the request body
+  const { content } = req.body;
+
+  // Get the comments for the post
+  const comments = commentsByPostId[req.params.id] || [];
+
+  // Add the new comment to the comments array
+  comments.push({ id: commentId, content, status: 'pending' });
+
+  // Update the comments for the post
+  commentsByPostId[req.params.id] = comments;
+
+  // Emit event to event bus
+  await axios.post('http://event-bus-srv:4005/events', {
+    type: 'CommentCreated',
+    data: { id: commentId, content, postId: req.params.id, status: 'pending' },
+  });
+
+  // Send the response
+  res.status(201).send(comments);
 });
 
-// start the server
-app.listen(process.env.PORT, process.env.IP, function() {
-    console.log("Server has started!");
-});
+// Receive events from event bus
+app.post('/events', async (req, res) => {
+  console.log('Received event', req.body.type);
+
+  // Get the event type and data
+  const { type, data } = req.body;
+
+  // If the event type is CommentModerated
+  if (type === 'CommentModerated') {
+    // Get the comments for the post
+    const comments = commentsByPostId[data.postId];
+
+    // Get the comment from the comments array
+    const comment = comments.find((comment) => {
+      return comment.id === data.id;
+    });
+
+    // Update the comment status
+    comment.status = data.status;
+
+    // Emit event to event bus
+    await axios.post('http://event-bus-srv:4005/events', {
+      type: 'CommentUpdated',
+      data: { ...comment, postId: data.postId },
+    });
+  }
